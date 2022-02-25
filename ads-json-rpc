@@ -1,0 +1,596 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import print_function
+
+import sys
+import argparse
+import json
+import time
+import requests
+import re
+from subprocess import PIPE, Popen
+from glob import glob
+from random import randint
+
+from flask import Flask, jsonify, request
+from flask_jsonrpc import JSONRPC
+from flask_jsonrpc.site import JSONRPCSite
+from flask_jsonrpc.exceptions import Error, InvalidParamsError
+from flask_jsonrpc.types import Type
+from waitress import serve
+
+if sys.version_info[0] == 3:
+    string_types = (str,)
+    integer_types = (int,)
+else:
+    string_types = (basestring, str, unicode)
+    integer_types = (int, long)
+
+Array = Type('Array', (object,), {}).I(list, set, frozenset, tuple).N('array')
+Boolean = Type('Boolean', (object,), {}).I(bool).N('boolean')
+Integer = Type('Number', (object,), {}).I(*integer_types).N('integer')
+Null = Type('Null', (object,), {}).I(type(None)).N('null')
+Number = Type('Number', (object,), {}).I(*(integer_types + (float, complex))).N('number')
+Object = Type('Object', (object,), {}).I(dict).N('object')
+String = Type('String', (object,), {}).I(*string_types).N('string')
+Any = Type('Any', (object,), {}).I(Array, Boolean, Integer, Null, Number, Object, String).N('any')
+
+# === config and globals ===
+
+corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+}
+
+ads_entrypoint = None
+ads_options = {
+    '_host': String,
+    '_port': Integer,
+    '_address': String,
+    '_dry-run': Boolean,
+    'signature': String,
+    'time': Integer,
+}
+ads_trans_args = {
+    'msid': Integer,
+    'hash': String,
+}
+ads_working_dir = None
+ads_transactions_dir = None
+ads_accounts_dir = None
+
+free_accounts_minimum_interval_in_seconds = 0
+free_accounts_minimum_interval_in_seconds_by_ip = 0
+
+free_accounts_counter = 0
+free_accounts_counter_by_ip = {}
+
+gateways = []
+
+# === helpers ===
+
+
+class AdsError(Error):
+    code = -32000
+    message = 'ADS CLI Client Error'
+
+    def __init__(self, message=None, code=None, data=None):
+        super(Error, self).__init__()
+        if message is not None:
+            self.message = message
+        if code is not None:
+            self.code = code
+        if data is not None:
+            self.data = data
+
+
+class AdsJSONRPCSite(JSONRPCSite):
+    def dispatch(self, req, method=''):
+        if req.method == 'OPTIONS':
+            rv = ''
+            status = 200
+        else:
+            rv, status = JSONRPCSite.dispatch(self, req, method)
+        response = jsonify(rv)
+        response.headers.extend(corsHeaders)
+        return response, status
+
+
+def validate_params(method, params, required={}, optional={}, transaction=False):
+    global ads_options, ads_trans_args
+    optional.update(ads_options)
+    if transaction:
+        optional.update(ads_trans_args)
+
+    params = {k: v for k, v in params.items() if v is not None}
+
+    req_counter = 0
+    for k in params:
+        if k in required:
+            req_counter += 1
+            param_type = required[k]
+        elif k in optional:
+            param_type = optional[k]
+        else:
+            raise InvalidParamsError('{0} is not a valid parameter for {1}'.format(k, method.__name__))
+
+        if not Any.kind(params[k]) == param_type:
+            raise InvalidParamsError('{0} is not the correct type {1} for {2}'.format(Any.kind(params[k]), param_type, k))
+
+    if req_counter != len(required):
+        raise InvalidParamsError('Not enough params provided for {0}'.format(method.__name__))
+
+
+def check_free_accounts_limit(ip):
+    global free_accounts_counter, free_accounts_counter_by_ip, free_accounts_minimum_interval_in_seconds, free_accounts_minimum_interval_in_seconds_by_ip
+
+    if free_accounts_minimum_interval_in_seconds == 0 or free_accounts_minimum_interval_in_seconds_by_ip == 0:
+        raise AdsError(code=-400, message="Free accounts are disabled.")
+
+    now = time.time()
+    ltime = now - free_accounts_minimum_interval_in_seconds
+    ltime_by_ip = now - free_accounts_minimum_interval_in_seconds_by_ip
+
+    if ip in free_accounts_counter_by_ip and ltime_by_ip <= free_accounts_counter_by_ip[ip]:
+        raise AdsError(code=-402, message="Your free accounts quota has been exceeded, please try again later.")
+    if ltime <= free_accounts_counter:
+        raise AdsError(code=-401, message="Free accounts quota has been exceeded, please try again later.")
+
+    free_accounts_counter = now
+    free_accounts_counter_by_ip[ip] = now
+    free_accounts_counter_by_ip = {k: v for k, v in free_accounts_counter_by_ip.items() if v >= ltime_by_ip}
+
+# === main app ===
+
+
+app = Flask('ads-json-rpc')
+jsonrpc = JSONRPC(app, '/', enable_web_browsable_api=False, site=AdsJSONRPCSite())
+
+# === RPC commands ===
+# === read commands ===
+
+
+@jsonrpc.method('decode_raw')
+def decode_raw(**kwargs):
+    validate_params(decode_raw, kwargs, required={'data': String}, optional={'signature': String})
+    return run_read_command('decode_raw', kwargs)
+
+
+@jsonrpc.method('get_account')
+def get_account(**kwargs):
+    validate_params(get_account, kwargs, required={'address': String})
+    return run_read_command('get_account', kwargs)
+
+
+@jsonrpc.method('get_accounts')
+def get_accounts(**kwargs):
+    validate_params(get_accounts, kwargs, required={'node': Integer}, optional={'block': String})
+    return run_read_command('get_accounts', kwargs)
+
+
+@jsonrpc.method('find_accounts')
+def find_accounts(**kwargs):
+    validate_params(find_accounts, kwargs, required={'public_key': String})
+    result = []
+    for node in range(1, 64):
+        try:
+            info = run_read_command('get_accounts', {'node': node})
+            for account in info['accounts']:
+                if kwargs['public_key'] == account['public_key']:
+                    result.append(account)
+        except AdsError:
+            continue
+
+    return {'accounts': result}
+
+
+@jsonrpc.method('get_block')
+def get_block(**kwargs):
+    validate_params(get_block, kwargs, optional={'block': String})
+    return run_read_command('get_block', kwargs)
+
+
+@jsonrpc.method('get_broadcast')
+def get_broadcast(**kwargs):
+    validate_params(get_broadcast, kwargs, optional={'from': String})
+    return run_read_command('get_broadcast', kwargs)
+
+
+@jsonrpc.method('get_log')
+def get_log(**kwargs):
+    validate_params(get_log, kwargs, required={'address': String}, optional={'from': Integer, 'type': String})
+    return run_read_command('get_log', kwargs)
+
+
+@jsonrpc.method('get_message')
+def get_message(**kwargs):
+    validate_params(get_message, kwargs, required={'message_id': String}, optional={'block': String})
+    return run_read_command('get_message', kwargs)
+
+
+@jsonrpc.method('get_message_list')
+def get_message_list(**kwargs):
+    validate_params(get_message_list, kwargs, optional={'block': String})
+    return run_read_command('get_message_list', kwargs)
+
+
+@jsonrpc.method('get_transaction')
+def get_transaction(**kwargs):
+    validate_params(get_transaction, kwargs, required={'txid': String})
+
+    while True:
+        ret = run_read_command('get_blocks')
+        if 'updated_blocks' not in ret or int(ret['updated_blocks']) <= 0:
+            break
+
+    return run_read_command('get_transaction', kwargs)
+
+
+@jsonrpc.method('get_vipkeys')
+def get_vipkeys(**kwargs):
+    validate_params(get_vipkeys, kwargs, required={'viphash': String})
+
+    while True:
+        ret = run_read_command('get_blocks')
+        if 'updated_blocks' not in ret or int(ret['updated_blocks']) <= 0:
+            break
+
+    return run_read_command('get_vipkeys', kwargs)
+
+
+@jsonrpc.method('get_signatures')
+def get_signatures(**kwargs):
+    validate_params(get_signatures, kwargs, optional={'block': String})
+    return run_read_command('get_signatures', kwargs)
+
+
+# === write commands ===
+
+
+@jsonrpc.method('broadcast')
+def broadcast(**kwargs):
+    validate_params(broadcast, kwargs, transaction=True, required={'message': String})
+    return run_write_command('broadcast', kwargs)
+
+
+@jsonrpc.method('change_account_key')
+def change_account_key(**kwargs):
+    validate_params(change_account_key, kwargs, transaction=True, required={'public_key': String, 'confirm': String})
+    return run_write_command('change_account_key', kwargs)
+
+
+@jsonrpc.method('change_node_key')
+def change_node_key(**kwargs):
+    validate_params(change_node_key, kwargs, transaction=True, required={'public_key': String}, optional={'node': Integer})
+    return run_write_command('change_node_key', kwargs)
+
+
+@jsonrpc.method('create_account')
+def create_account(**kwargs):
+    validate_params(create_account, kwargs, transaction=True, optional={'node': Integer, 'public_key': String, 'confirm': String})
+    return run_write_command('create_account', kwargs)
+
+
+@jsonrpc.method('create_node')
+def create_node(**kwargs):
+    validate_params(create_node, kwargs, transaction=True)
+    return run_write_command('create_node', kwargs)
+
+
+@jsonrpc.method('log_account')
+def log_account(**kwargs):
+    validate_params(log_account, kwargs, transaction=True)
+    return run_write_command('log_account', kwargs)
+
+
+@jsonrpc.method('retrieve_funds')
+def retrieve_funds(**kwargs):
+    validate_params(retrieve_funds, kwargs, transaction=True, required={'address': String})
+    return run_write_command('retrieve_funds', kwargs)
+
+
+@jsonrpc.method('send_again')
+def send_again(**kwargs):
+    validate_params(send_again, kwargs, transaction=True, required={'data': String, 'signature': String})
+    return run_write_command('send_again', kwargs)
+
+
+@jsonrpc.method('send_one')
+def send_one(**kwargs):
+    validate_params(send_one, kwargs, transaction=True, required={'address': String, 'amount': String}, optional={'message': String})
+    return run_write_command('send_one', kwargs)
+
+
+@jsonrpc.method('send_many')
+def send_many(**kwargs):
+    validate_params(send_many, kwargs, transaction=True, required={'wires': Object})
+    # validate_params(send_one, kwargs['wires'], required={'x': Number})
+    return run_write_command('send_many', kwargs)
+
+
+@jsonrpc.method('set_account_status')
+def set_account_status(**kwargs):
+    validate_params(set_account_status, kwargs, transaction=True, required={'address': String, 'status': Integer})
+    return run_write_command('set_account_status', kwargs)
+
+
+@jsonrpc.method('set_node_status')
+def set_node_status(**kwargs):
+    validate_params(set_node_status, kwargs, transaction=True, required={'node': Integer, 'status': Integer})
+    return run_write_command('set_node_status', kwargs)
+
+
+@jsonrpc.method('unset_account_status')
+def unset_account_status(**kwargs):
+    validate_params(unset_account_status, kwargs, transaction=True, required={'address': String, 'status': Integer})
+    return run_write_command('unset_account_status', kwargs)
+
+
+@jsonrpc.method('unset_node_status')
+def unset_node_status(**kwargs):
+    validate_params(unset_node_status, kwargs, transaction=True, required={'node': Integer, 'status': Integer})
+    return run_write_command('unset_node_status', kwargs)
+
+
+# === protected commands ===
+
+
+@jsonrpc.method('get_me')
+def get_me(**kwargs):
+    validate_params(get_me, kwargs, transaction=True)
+    global ads_transactions_dir
+    return run_command('get_me', kwargs, working_dir=ads_transactions_dir)
+
+
+# === free account command ===
+
+
+@jsonrpc.method('create_free_account')
+def create_free_account(**kwargs):
+    validate_params(create_free_account, kwargs, required={'public_key': String, 'confirm': String})
+    check_free_accounts_limit(request.headers.get('X-Forwarded-For') or request.environ.get('REMOTE_ADDR'))
+    global ads_accounts_dir
+
+    working_dir = ads_accounts_dir
+    dirs = glob('{0}/[0-9][0-9][0-9][0-9]/'.format(ads_accounts_dir))
+    if dirs:
+        working_dir = dirs[randint(0, len(dirs) - 1)]
+
+    return run_command('create_account', kwargs, run_get_me=True, working_dir=working_dir)
+
+
+# === wrap gateways commands ===
+
+
+@jsonrpc.method('get_gateways')
+def get_gateways(**kwargs):
+    validate_params(get_gateways, kwargs)
+    global gateways
+    items = []
+    for code in gateways:
+        items.append({
+            'code': code,
+            'name': gateways[code]['name'],
+            'description': gateways[code]['description'],
+            'address': gateways[code]['address'],
+            'format': gateways[code]['format'],
+            'prefix': gateways[code]['prefix'],
+            'chain_id': gateways[code]['chain_id'],
+            'contract_address': gateways[code]['contract_address'],
+        })
+    return {'gateways': items}
+
+
+# === get gateway fee ===
+
+
+@jsonrpc.method('get_gateway_fee')
+def get_gateway_fee(**kwargs):
+    validate_params(get_gateway_fee, kwargs, required={'code': String, 'amount': Integer, 'address': String})
+    global gateways
+
+    if kwargs['code'] not in gateways:
+        raise Error('Cannot find gateway {0}'.format(kwargs['code']))
+
+    gateway = gateways[kwargs['code']]
+    params = {
+        'gate': kwargs['code'],
+        'amount': kwargs['amount'],
+        'address': kwargs['address'],
+    }
+    response = requests.get(url=gateway['fee_url'], params=params).json()
+    if 'error' in response:
+        raise AdsError(response['error'])
+    return {'fee': response['fee'] if 'fee' in response else None}
+
+
+# === get my ip command ===
+
+
+@jsonrpc.method('get_my_ip')
+def get_my_ip(**kwargs):
+    validate_params(get_timestamp, kwargs)
+    return {'ip': request.headers.get('X-Forwarded-For') or request.environ.get('REMOTE_ADDR')}
+
+
+# === get timestamp command ===
+
+
+@jsonrpc.method('get_timestamp')
+def get_timestamp(**kwargs):
+    validate_params(get_timestamp, kwargs)
+    return {'timestamp': time.time()}
+
+
+# === get info command ===
+
+
+@jsonrpc.method('get_info')
+def get_info(**kwargs):
+    validate_params(get_timestamp, kwargs)
+
+    global ads_entrypoint
+    out, err = Popen(ads_entrypoint[:] + ['--version'], stdout=PIPE, stderr=PIPE, universal_newlines=True).communicate()
+    ads_version = err.split("\n")[1][8:]
+
+    out, err = Popen('dpkg -s ads-tools | grep Version', shell=True, stdout=PIPE, stderr=PIPE, universal_newlines=True).communicate()
+    if out:
+        version = re.search('Version: (.*)-.*', out.split("\n")[0]).group(1)
+    else:
+        out, err = Popen('git describe --tags --always', shell=True, stdout=PIPE, stderr=PIPE, universal_newlines=True).communicate()
+        version = out.split("\n")[0][1:]
+
+    return {
+        'info': {
+            'name': 'ads-json-rpc',
+            'version': version,
+            'description': 'ADS JSON-RPC server',
+            'author': 'Adshares <dev@adshares.net>',
+            'ads_version': ads_version,
+        }
+    }
+
+
+# === ping command ===
+
+
+@jsonrpc.method('ping')
+def ping(**kwargs):
+    validate_params(ping, kwargs, optional={'data': String})
+    return {'data': kwargs['data'] if 'data' in kwargs else None}
+
+
+# === end of RPC commands ===
+
+
+def cli(command, data = None):
+    ps = Popen(command, stdout=PIPE, stdin=PIPE, stderr=PIPE)
+    return ps.communicate(data)
+
+
+def run_read_command(command_name, arguments=None):
+    global ads_working_dir
+    return run_command(command_name, arguments, working_dir=ads_working_dir)
+
+
+def run_write_command(command_name, arguments=None, cmd_args=None):
+    global ads_transactions_dir
+    run_get_me = 'signature' not in arguments
+    return run_command(command_name, arguments, run_get_me=run_get_me, working_dir=ads_transactions_dir)
+
+
+def run_command(command_name, arguments=None, working_dir=None, run_get_me=False):
+
+    global ads_entrypoint
+    ads = ads_entrypoint[:]
+
+    if not arguments:
+        arguments = {}
+    arguments = {k: v for k, v in arguments.items() if v is not None}
+
+    args = {}
+    for k in arguments.keys():
+        if k.startswith('_'):
+            ads += ['--{}'.format(k[1:]), str(arguments[k])]
+        else:
+            args.update({k: arguments[k]})
+    if working_dir:
+        ads += ['--work-dir', working_dir]
+    args.update({'run': command_name})
+
+    ps = Popen(ads, stdout=PIPE, stdin=PIPE, stderr=PIPE, universal_newlines=True)
+
+    if run_get_me:
+        out, err = ps.communicate('{"run":"get_me"}\n' + json.dumps(args) + '\n')
+    else:
+        out, err = ps.communicate(json.dumps(args) + '\n')
+
+    if not out:
+        raise AdsError(data=err)
+
+    responses = out.split("\n")
+
+    if run_get_me and len(responses) == 1:
+        raise AdsError(data=err)
+
+    # Check for errors in ADS output
+    responses = [json.loads(r) for r in responses if r]
+    for response in responses:
+        if 'error' in response:
+            message = response['error']
+            code = data = None
+            if 'error_code' in response:
+                code = response['error_code']
+            if 'error_info' in response:
+                data = response['error_info']
+            raise AdsError(message, code, data)
+
+    # Return last response (or first if one element list)
+    return responses[-1]
+
+
+def load_gateways(file):
+    items = {}
+    try:
+        with open(file) as json_file:
+            for gateway in json.load(json_file):
+                if 'code' not in gateway:
+                    raise Error('Gate code is required')
+                if 'address' not in gateway:
+                    raise Error('Gate address is required')
+                if 'fee_url' not in gateway:
+                    raise Error('Gate fee URL is required')
+                items[gateway['code']] = {
+                    'name': gateway['name'] if 'name' in gateway else gateway['code'],
+                    'description': gateway['description'] if 'description' in gateway else None,
+                    'address': gateway['address'],
+                    'format': gateway['format'] if 'format' in gateway else 'eth',
+                    'prefix': gateway['prefix'] if 'prefix' in gateway else None,
+                    'chain_id': gateway['chain_id'] if 'chain_id' in gateway else None,
+                    'contract_address': gateway['contract_address'] if 'contract_address' in gateway else None,
+                    'fee_url': gateway['fee_url'],
+                }
+    except IOError:
+        items = {}
+    return items
+
+
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description='Run JSON-RPC proxy server to ADS client')
+    parser.add_argument('--port', type=int, help='Server port', default=5000)
+    parser.add_argument('--host', help='Server listening interface', default='127.0.0.1')
+    parser.add_argument('--ads', help='ADS client', default='ads')
+    parser.add_argument('-f', '--flimit', type=int, help='Minimal creation interval of free account in seconds', default=0)
+    parser.add_argument('-i', '--ilimit', type=int, help='Minimal creation interval of free account from the same IP address in seconds')
+    parser.add_argument('-d', '--debug', action='store_true', help='Debug mode')
+    parser.add_argument('-w', '--working-dir', help='Path to ads working directory')
+    parser.add_argument('-t', '--transactions-dir', help='Path to ads working directory for transactions')
+    parser.add_argument('-a', '--accounts-dir', help='Path to ads working directories for creating free accounts')
+    parser.add_argument('-g', '--gateways', help='Path to gateways config file')
+
+    args = parser.parse_args()
+
+    ads_entrypoint = [args.ads, '-n0']
+    free_accounts_minimum_interval_in_seconds = args.flimit
+    free_accounts_minimum_interval_in_seconds_by_ip = args.flimit
+    if args.ilimit is not None:
+        free_accounts_minimum_interval_in_seconds_by_ip = args.ilimit
+    if args.working_dir:
+        ads_working_dir = args.working_dir
+        ads_transactions_dir = args.working_dir
+        ads_accounts_dir = args.working_dir
+    if args.transactions_dir:
+        ads_transactions_dir = args.transactions_dir
+    if args.accounts_dir:
+        ads_accounts_dir = args.accounts_dir
+
+    gateways = load_gateways(args.gateways) if args.gateways else {}
+
+    if args.debug:
+        print(' # {0} gateways loaded'.format(len(gateways)))
+        app.run(host=args.host, port=args.port, debug=args.debug)
+    else:
+        serve(app,
