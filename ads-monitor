@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# Formatting date and time
+date_msg()
+{
+    echo "$(date +'%F %T') | $(date --date=@$1 +'%F %T')  $2"
+}
+
+# Calculating transactions per second
+tps() {
+    actual_txs=
+    tac $1 | grep CLOCK | head -2 | while read line
+    do
+        if [[ ${line} =~ \[([0-9]+)\]\ CLOCK:\ ([0-9A-F]+).*txs:([0-9]+) ]]; then
+
+            if [ -z "$actual_txs" ]; then
+                actual_time=${BASH_REMATCH[1]}
+                actual_clock="0x000${BASH_REMATCH[2]}"
+                actual_txs=${BASH_REMATCH[3]}
+            else
+                last_time=${BASH_REMATCH[1]}
+                last_clock="0x000${BASH_REMATCH[2]}"
+                last_txs=${BASH_REMATCH[3]}
+
+                if [ $(( $actual_clock )) -ge "0" ] && [ $(( $last_clock )) -lt "0" ]; then
+                    txs=${actual_txs}
+                else
+                    txs="$(($actual_txs - $last_txs))"
+                fi
+
+                if [ -n "$2" ]; then
+                    date_msg ${actual_time} "0x${actual_clock: -3}  $txs"
+                else
+                    echo ${txs}
+                fi
+
+                break
+            fi
+        fi
+    done
+}
+
+# Parsing CLOCK log
+clock() {
+
+	line=`tac $2 | grep -m 1 -E "^\[[0-9]+\]"`
+    regex="^\[([0-9]+)\]\ (\[.*\]\ )?([A-Z ]+:\ )?Awaiting for genesis block time:\ ([0-9]+\ s)"
+
+    if [[ ${line} =~ ${regex} ]]; then
+	    if [ -n "$4" ]; then
+			 if [ -n "$3" ]; then
+		        date_msg ${BASH_REMATCH[1]} "The node will start in ${BASH_REMATCH[4]}"
+		    else
+		        echo 1
+		    fi
+		    return
+		else
+	        >&2 date_msg ${BASH_REMATCH[1]} "The node will start in ${BASH_REMATCH[4]}"
+	        echo 0
+			return 1
+		fi
+    fi
+
+    item=$1
+    if [[ "$1" = "time" || "$1" = "net" ]]; then
+        item=peers
+    fi
+    sync_regex="^([0-9]+):\[([0-9]+)\]\ (\[.*\]\ )?([A-Z\ ]+:\ )?START\ syncing\ header\ ([0-9A-F]+)$"
+    clock_regex="^([0-9]+):\[([0-9]+)\]\ (\[.*\]\ )?([A-Z\ ]+:\ )?CLOCK:\ ([0-9A-F]+).*\ ${item}:([0-9]+).*\ \[,?([,0-9]*)\]"
+
+    sync_line=`tac $2 | grep -n "START syncing header" | head -1`
+    clock_line=`tac $2 | grep -n CLOCK | head -1`
+
+	if [[ ${sync_line} =~ ${sync_regex} ]]; then
+		sync_num=${BASH_REMATCH[1]}
+		sync_time=${BASH_REMATCH[2]}
+		sync_block=${BASH_REMATCH[5]}
+	fi
+
+	if [[ ${clock_line} =~ ${clock_regex} ]]; then
+		clock_num=${BASH_REMATCH[1]}
+		clock_time=${BASH_REMATCH[2]}
+		clock_count=${BASH_REMATCH[5]}
+		clock_val=${BASH_REMATCH[6]}
+	    if [ "$1" = "time" ]; then
+            clock_val=${clock_time}
+        elif [ "$1" = "net" ]; then
+            clock_val=${BASH_REMATCH[7]}
+        fi
+	fi
+
+	if [ -n "${sync_num}" ] && ([ -z "${clock_num}" ] || [ ${sync_num} -le ${clock_num} ]); then
+		left_blocks=$(( (`date +%s` / 512) - ("0x${sync_block}" / 512) ))
+		if [ -n "$4" ]; then
+			 if [ -n "$3" ]; then
+		        date_msg ${sync_time} "Database synchronizing; left ${left_blocks} blocks"
+		    else
+		        echo 2
+		    fi
+		    return
+		else
+	        >&2 date_msg ${sync_time} "Database synchronizing; left ${left_blocks} blocks"
+	        echo 0
+			return 2
+		fi
+	elif [ -n "${clock_num}" ]; then
+        clock="0x000${clock_count}"
+        if [ -n "$3" ]; then
+            date_msg ${clock_time} "0x${clock: -3}  ${clock_val}"
+        elif [ -n "$4" ]; then
+            echo $(( 100 + ${clock_val} ))
+        else
+            echo ${clock_val}
+        fi
+	else
+		if [ -n "$4" ]; then
+			 if [ -n "$3" ]; then
+		        echo "Error 22: Cannot find CLOCK log"
+		    else
+		        echo 22
+		    fi
+		    exit
+		else
