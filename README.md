@@ -1,2 +1,0 @@
-# Metaverse5G
-AMAZING
