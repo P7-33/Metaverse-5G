@@ -36,11 +36,11 @@ Documentation Contributions
 License
 
 API Reference
-An intricate reference to the APIs on the Terra SDK can be found here.
+An intricate reference to the APIs on the Metaverse5G SDK can be found here.
 
 
 Getting Started
-A walk-through of the steps to get started with the Terra SDK alongside a few use case examples are provided below. Alternatively, a tutorial video is also available here as reference.
+A walk-through of the steps to get started with the Metaverse5G SDK alongside a few use case examples are provided below. Alternatively, a tutorial video is also available here as reference.
 
 Requirements
 Terra SDK requires Python v3.7+
@@ -64,7 +64,7 @@ const metaverse5G = new LCDClient({
 // To use LocalMetaverse5G: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
 // const terra = new LCDClient({
 //   URL: 'http://localhost:1317',
-//   chainID: 'localterra'
+//   chainID: 'localmetaverse5G'
 // });
 
 // get the current swap rate from 1 Metaverse5GUSD to Metaverse5GKRW
@@ -97,7 +97,7 @@ const metaverse5G = new LCDClient({
 
 // a wallet can be created out of any key
 // wallets abstract transaction building
-const wallet = terra.wallet(mk);
+const wallet = metaverse5G.wallet(mk);
 
 // create a simple message that moves coin balances
 const send = new MsgSend(
@@ -126,8 +126,8 @@ You can access all the objects of the @metaverse5G-money/metaverse5G.js from the
 ></script>
 You can find a small JSFiddle example that refreshes current Oracle votes here.
 
-# Metaverse.js in React Native
-In order to use Terra.js inside React Native, you need to add the node-libs-react-native package and react-native-get-random-values package to your React Native app's package.json.
+# Metaverse5G.js in React Native
+In order to use Metaverse5G.js inside React Native, you need to add the node-libs-react-native package and react-native-get-random-values package to your React Native app's package.json.
 
 yarn add node-libs-react-native react-native-get-random-values
 You will need to register Node.js native modules in an entry point of your application, such as index.tsx:
