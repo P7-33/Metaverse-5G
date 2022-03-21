@@ -10,9 +10,9 @@ import "./libs/interface/IBondCalculator.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 
 //modified from OlympusDao
-//author : _bing @ MetaversePRO
+//author :  @multiverso-10G
 
-contract MetaTreasury is DaoOwnable {
+contract MultyTreasury is multywnable {
 
     using SafeMath for uint;
     using SafeERC20 for IERC20;
@@ -73,7 +73,7 @@ contract MetaTreasury is DaoOwnable {
     mapping( address => uint ) public rewardManagerQueue; // Delays changes to mapping.
 
     address public sMETA;
-    uint public sMETAQueue; // Delays change to sMETA address
+    uint public sMULTYQueue; // Delays change to sMETA address
     
     uint public totalReserves; // Risk-free value of all assets
     uint public totalDebt;
