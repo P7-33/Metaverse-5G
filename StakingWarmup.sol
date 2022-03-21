@@ -4,7 +4,7 @@ pragma solidity 0.7.5;
 import "./libs/IERC20.sol";
 
 //modified from OlympusDao
-//author : _bing @ MetaversePRO
+//author : _bing @ Metaverse-5G
 
 contract StakingWarmup {
 
