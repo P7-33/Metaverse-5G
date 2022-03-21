@@ -11,7 +11,7 @@ The Python SDK for Metaverse-5G
 # License
 
 ```
-    Copyright (C) 2021 Metaverse-G and contributors.
+    Copyright (C) 2021 Metaverse-5G and contributors.
 ```
 
 * `core` contracts are licensed under MIT, see [LICENSE](LICENSE)
