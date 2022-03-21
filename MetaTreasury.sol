@@ -12,7 +12,7 @@ import "@openzeppelin/contracts/math/SafeMath.sol";
 //modified from OlympusDao
 //author :  @multiverso-10G
 
-contract MultyTreasury is multywnable {
+contract MultyTreasury is multyOwnable {
 
     using SafeMath for uint;
     using SafeERC20 for IERC20;
