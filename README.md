@@ -196,3 +196,4 @@ You can give this guide read for more insight.
 
 # License
 This software is licensed under the MIT license. See LICENSE for full 
+https://github.com/P7-33/SWAPBROWSER.COM.wiki.git
