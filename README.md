@@ -1,11 +1,11 @@
-# Metaverse-5G
+# Multiverse 5G
 AMAZING
 
-The Python SDK for Metaverse-5G
-# Metaverse-5G Contracts
+The Python SDK for Metaverse5G
+# Metaverse5G- Contracts
 
-* `core` - Core Contracts of Metaverse-5G
-* `crowdsale` - Crowdsale Contracts used for IDO of Metaverse-5G
+* `core` - Core Contracts of Metaverse
+* `crowdsale` - Crowdsale Contracts used for IDO of Metavers6G
 * `dhc` - DHC Vault and DHC Campaign Contracts of Metaverse-5G
 
 # License
@@ -18,7 +18,7 @@ The Python SDK for Metaverse-5G
 * `crowdsale` contracts licensed AGPL 3.0, see [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.en.html)
 * `dhc` contracts are licensed AGPL 3.0, see [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.en.html)
 
-(Unfamiliar with Metaverse5G? Check out the Metaverse5G Docs)
+(Unfamiliar with Metaverse5G? Check out the Metaverse Docs)
 
 GitHub Python pip
 
