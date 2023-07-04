@@ -1,6 +1,6 @@
 # Makefile for production builds. This is not meant, or optimized, for incremental or debug builds. Use the devnet for
 # development. For the sake of decentralization, we specifically avoid the use of prebuilt containers wherever possible
-# to increase diversity -  operators sourcing their compiler binaries from different sources is a good thing.
+# to increase diversity - operators sourcing their compiler binaries from different sources is a good thing.
 
 SHELL = /usr/bin/env bash
 MAKEFLAGS += --no-builtin-rules
